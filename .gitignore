@@ -1,0 +1,6 @@
+/wandb
+/untracked
+/checkpoint
+/data
+__pycache__
+.vscode
