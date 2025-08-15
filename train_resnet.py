@@ -1,6 +1,6 @@
 import os
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import jax
 import optax
@@ -8,43 +8,87 @@ from flax import nnx
 import wandb
 from tqdm import tqdm
 import orbax.checkpoint as orbax
-from typing import Type
-import resnet
+from typing import Optional
+import models.resnet as resnet
 from dataloader_tfds import build_dataloader
 
 
-def save_checkpoint(model: nnx.Module, path: str):
-    state = nnx.state(model)
-    # Save the parameters
-    checkpointer = orbax.PyTreeCheckpointer()
-    checkpointer.save(f"{path}/state", state)
+def create_checkpoint_manager(
+    save_dir: str, max_to_keep: int = 5
+) -> orbax.CheckpointManager:
+    """Create a checkpoint manager with automatic cleanup."""
+    options = orbax.CheckpointManagerOptions(
+        max_to_keep=max_to_keep,
+        create=True,
+    )
+    return orbax.CheckpointManager(save_dir, orbax.PyTreeCheckpointer(), options)
 
 
-def load_checkpoint(model_arch: Type[nnx.Module], path: str) -> nnx.Module:
-    # create that model with abstract shapes
-    model = nnx.eval_shape(lambda: model_arch(rngs=nnx.Rngs(0)))
-    state = nnx.state(model)
-    # Load the parameters
-    checkpointer = orbax.PyTreeCheckpointer()
-    state = checkpointer.restore(f"{path}/state", item=state)
-    # update the model with the loaded state
-    nnx.update(model, state)
-    return model
+def save_checkpoint(
+    checkpoint_manager: orbax.CheckpointManager,
+    model: nnx.Module,
+    optimizer: nnx.Optimizer,
+    step: int,
+    metrics: Optional[dict] = None,
+):
+    """Save checkpoint with model, optimizer state, and optional metrics."""
+    state = {
+        "model": nnx.state(model),
+        "optimizer": nnx.state(optimizer),
+        "step": step,
+    }
+    if metrics:
+        state["metrics"] = metrics
+
+    checkpoint_manager.save(step, state)
+
+
+def load_checkpoint(
+    model: nnx.Module,
+    optimizer: nnx.Optimizer,
+    checkpoint_manager: orbax.CheckpointManager,
+    step: Optional[int] = None,
+) -> int:
+    """Load checkpoint into existing model and optimizer objects and return step."""
+    # Get the latest step if not specified
+    if step is None:
+        step = checkpoint_manager.latest_step()
+        if step is None:
+            raise ValueError("No checkpoint found")
+
+    # Load the checkpoint
+    restored_state = checkpoint_manager.restore(step)
+
+    # Update model and optimizer with loaded state
+    nnx.update(model, restored_state["model"])
+    nnx.update(optimizer, restored_state["optimizer"])
+
+    return restored_state["step"]
 
 
 def launch(args):
     train_loader, val_loader = build_dataloader(args.batch_size)
 
     model_arch = resnet.__dict__[f"resnet{args.model_depth}"]
-    model = model_arch(rngs=nnx.Rngs(args.seed))
+    model = model_arch(norm_type=args.norm_type, rngs=nnx.Rngs(args.seed))
 
     train_steps_per_epoch = 50000 // args.batch_size
-    schedule = optax.piecewise_constant_schedule(
-        init_value=args.optim_lr,
-        boundaries_and_scales={
-            100 * train_steps_per_epoch: 0.1,
-            150 * train_steps_per_epoch: 0.1,
-        },
+    schedule = optax.join_schedules(
+        schedules=[
+            optax.linear_schedule(
+                init_value=0.01 * args.optim_lr,
+                end_value=args.optim_lr,
+                transition_steps=args.warmup_epochs * train_steps_per_epoch,
+            ),
+            optax.cosine_decay_schedule(
+                init_value=args.optim_lr,
+                decay_steps=(args.optim_num_epochs - args.warmup_epochs)
+                * train_steps_per_epoch,
+            ),
+        ],
+        boundaries=[
+            args.warmup_epochs * train_steps_per_epoch,
+        ],
     )
     tx = optax.chain(
         optax.add_decayed_weights(weight_decay=args.optim_weight_decay),
@@ -56,6 +100,21 @@ def launch(args):
         accuracy=nnx.metrics.Accuracy(),
         loss=nnx.metrics.Average("loss"),
     )
+
+    # Create checkpoint manager
+    checkpoint_manager = create_checkpoint_manager(
+        args.save_dir, max_to_keep=args.max_checkpoints_to_keep
+    )
+
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    if args.resume_dir:
+        resume_manager = create_checkpoint_manager(args.resume_dir, max_to_keep=1)
+        try:
+            start_epoch = load_checkpoint(model, optimizer, resume_manager)
+            print(f"Resumed training from epoch {start_epoch}")
+        except ValueError:
+            print(f"No checkpoint found in {args.resume_dir}, starting from scratch")
 
     def loss_fn(model: nnx.Module, batch):
         logits = model(batch["image"])
@@ -80,7 +139,7 @@ def launch(args):
         metrics.update(loss=loss, logits=logits, labels=batch["label"])
 
     with wandb.init(project="resnet-cifar10", config=args) as run:
-        for epoch in tqdm(range(args.optim_num_epochs)):
+        for epoch in tqdm(range(start_epoch, args.optim_num_epochs)):
             model.train()
             train_epoch_loader = train_loader.take(train_steps_per_epoch)
             for batch in train_epoch_loader.as_numpy_iterator():
@@ -100,15 +159,29 @@ def launch(args):
                 f"test/{metric}": value for metric, value in metrics.compute().items()
             }
             metrics.reset()  # Reset the metrics for the next training epoch.
+
             run.log(
                 {
                     **train_metrics_dict,
                     **test_metrics_dict,
                     "lr": schedule(int(optimizer.step.value)).item(),
-                    "steps": optimizer.step.value,
+                    "opt_steps": optimizer.step.value,
                 }
             )
-            save_checkpoint(model, os.path.abspath(f"{args.save_dir}/{epoch+1:03d}"))
+
+            # Save checkpoint with specified frequency
+            step = epoch + 1
+            if (
+                step % args.checkpoint_every_n_epochs == 0
+                or step == args.optim_num_epochs
+            ):
+                save_checkpoint(
+                    checkpoint_manager,
+                    model,
+                    optimizer,
+                    step,
+                    metrics={**train_metrics_dict, **test_metrics_dict},
+                )
 
 
 def main():
@@ -117,17 +190,40 @@ def main():
         "--model_depth", default=32, type=int, choices=[20, 32, 44, 56, 110]
     )
     parser.add_argument("--batch_size", default=256, type=int)
-    parser.add_argument("--seed", default=3, type=int)
+    parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
+    parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--optim_lr", default=0.1, type=float)
     parser.add_argument("--optim_momentum", default=0.9, type=float)
     parser.add_argument("--optim_weight_decay", default=1e-4, type=float)
-    parser.add_argument("--optim_num_epochs", default=200, type=int)
-    parser.add_argument("--save_dir", default="./checkpoint/", type=str)
+    parser.add_argument("--optim_num_epochs", default=800, type=int)
+    parser.add_argument("--warmup_epochs", default=10, type=int)
+    parser.add_argument("--save_dir", default="./checkpoint/resnet", type=str)
+    parser.add_argument(
+        "--max_checkpoints_to_keep",
+        default=10,
+        type=int,
+        help="Maximum number of checkpoints to keep (older ones will be deleted)",
+    )
+    parser.add_argument(
+        "--checkpoint_every_n_epochs",
+        default=5,
+        type=int,
+        help="Save checkpoint every N epochs",
+    )
+    parser.add_argument(
+        "--resume_dir",
+        default=None,
+        type=str,
+        help="Path to checkpoint directory to resume from",
+    )
 
     args = parser.parse_args()
-    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    KST = timezone(timedelta(hours=9))
+    now = datetime.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
     save_dir = os.path.join(args.save_dir, now)
-    args.save_dir = save_dir
+    args.save_dir = os.path.abspath(save_dir)
+    if args.resume_dir:
+        args.resume_dir = os.path.abspath(args.resume_dir)
     launch(args)
 
 
