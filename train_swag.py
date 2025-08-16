@@ -99,11 +99,6 @@ def load_swag_state(
     restored_state = checkpoint_manager.restore(0)
     # Convert to proper SWAGState object
     swag_state_dict = restored_state["swag_state"]
-
-    def _unwrap_value(x):
-        return x["value"] if isinstance(x, dict) and "value" in x and len(x) == 1 else x
-
-    swag_state_dict = jax.tree_util.tree_map(_unwrap_value, swag_state_dict)
     return swag.SWAGState(**swag_state_dict)
 
 
