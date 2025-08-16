@@ -1,6 +1,6 @@
 import os
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 import jax
 import jax.numpy as jnp
@@ -9,35 +9,102 @@ from flax import nnx
 import wandb
 from tqdm import tqdm
 import orbax.checkpoint as orbax
-from typing import Type
-import resnet
+from typing import Optional
+import models.resnet as resnet
 from dataloader_tfds import build_dataloader
 import swag
+from eval import evaluate_nll, evaluate_ece
 
 
-def save_model_state(model: nnx.Module, path: str):
-    state = nnx.state(model).to_pure_dict()
-    # Save the parameters
-    checkpointer = orbax.PyTreeCheckpointer()
-    checkpointer.save(f"{path}/model", state)
+def create_checkpoint_manager(
+    save_dir: str, max_to_keep: int = 5
+) -> orbax.CheckpointManager:
+    """Create a checkpoint manager with automatic cleanup."""
+    options = orbax.CheckpointManagerOptions(
+        max_to_keep=max_to_keep,
+        create=True,
+    )
+    return orbax.CheckpointManager(save_dir, orbax.PyTreeCheckpointer(), options)
 
 
-def save_opt_state(optimizer: nnx.Optimizer, path: str):
-    state = nnx.state(optimizer).to_pure_dict()
-    checkpointer = orbax.PyTreeCheckpointer()
-    checkpointer.save(f"{path}/opt", state)
+def save_checkpoint(
+    checkpoint_manager: orbax.CheckpointManager,
+    model: nnx.Module,
+    optimizer: nnx.Optimizer,
+    step: int,
+    metrics: Optional[dict] = None,
+):
+    """Save checkpoint with model, optimizer state, and optional metrics."""
+    state = {
+        "model": nnx.state(model),
+        "optimizer": nnx.state(optimizer),
+        "step": step,
+    }
+    if metrics:
+        state["metrics"] = metrics
+
+    checkpoint_manager.save(step, state)
 
 
-def load_model_state(model_arch: Type[nnx.Module], path: str) -> nnx.Module:
-    # create that model with abstract shapes
-    model = nnx.eval_shape(lambda: model_arch(rngs=nnx.Rngs(0)))
-    state = nnx.state(model)
-    # Load the parameters
-    checkpointer = orbax.PyTreeCheckpointer()
-    state = checkpointer.restore(f"{path}/state", item=state)
-    # update the model with the loaded state
-    nnx.update(model, state)
-    return model
+def load_checkpoint(
+    model: nnx.Module,
+    optimizer: nnx.Optimizer,
+    checkpoint_manager: orbax.CheckpointManager,
+    step: Optional[int] = None,
+) -> int:
+    """Load checkpoint into existing model and optimizer objects and return step."""
+    # Get the latest step if not specified
+    if step is None:
+        step = checkpoint_manager.latest_step()
+        if step is None:
+            raise ValueError("No checkpoint found")
+
+    # Load the checkpoint
+    restored_state = checkpoint_manager.restore(step)
+
+    # Update model and optimizer with loaded state
+    nnx.update(model, restored_state["model"])
+    nnx.update(optimizer, restored_state["optimizer"])
+
+    return restored_state["step"]
+
+
+def save_swag_state(
+    swag_state: swag.SWAGState,
+    save_path: str,
+    model_id: Optional[str] = None,
+):
+    """Save SWAG state separately for inference."""
+    if model_id:
+        save_path = os.path.join(save_path, f"model_{model_id}")
+
+    checkpoint_manager = orbax.CheckpointManager(
+        save_path,
+        orbax.PyTreeCheckpointer(),
+        orbax.CheckpointManagerOptions(max_to_keep=1, create=True),
+    )
+    checkpoint_manager.save(0, {"swag_state": swag_state})
+    print(f"SWAG state saved to {save_path}")
+
+
+def load_swag_state(
+    load_path: str,
+) -> swag.SWAGState:  # Change return type annotation
+    """Load SWAG state for inference."""
+    checkpoint_manager = orbax.CheckpointManager(
+        load_path,
+        orbax.PyTreeCheckpointer(),
+        orbax.CheckpointManagerOptions(max_to_keep=1, create=False),
+    )
+    restored_state = checkpoint_manager.restore(0)
+    # Convert to proper SWAGState object
+    swag_state_dict = restored_state["swag_state"]
+
+    def _unwrap_value(x):
+        return x["value"] if isinstance(x, dict) and "value" in x and len(x) == 1 else x
+
+    swag_state_dict = jax.tree_util.tree_map(_unwrap_value, swag_state_dict)
+    return swag.SWAGState(**swag_state_dict)
 
 
 def launch(args):
@@ -45,7 +112,7 @@ def launch(args):
     train_loader, val_loader = build_dataloader(args.batch_size)
 
     model_arch = resnet.__dict__[f"resnet{args.model_depth}"]
-    model = model_arch(rngs=nnx.Rngs(model_key))
+    model = model_arch(norm_type=args.norm_type, rngs=nnx.Rngs(model_key))
     graphdef, _, initial_batch_stats = nnx.split(model, nnx.Param, nnx.BatchStat)
     train_steps_per_epoch = 50000 // args.batch_size
     scheduler = optax.join_schedules(
@@ -84,7 +151,23 @@ def launch(args):
     metrics = nnx.MultiMetric(
         accuracy=nnx.metrics.Accuracy(),
         loss=nnx.metrics.Average("loss"),
+        ece=nnx.metrics.Average("ece"),
     )
+
+    # Create checkpoint manager
+    checkpoint_manager = create_checkpoint_manager(
+        args.save_dir, max_to_keep=args.max_checkpoints_to_keep
+    )
+
+    # Resume from checkpoint if specified
+    start_epoch = 0
+    if args.resume_dir:
+        resume_manager = create_checkpoint_manager(args.resume_dir, max_to_keep=1)
+        try:
+            start_epoch = load_checkpoint(model, optimizer, resume_manager)
+            print(f"Resumed training from epoch {start_epoch}")
+        except ValueError:
+            print(f"No checkpoint found in {args.resume_dir}, starting from scratch")
 
     def loss_fn(model: nnx.Module, batch):
         logits = model(batch["image"])
@@ -100,44 +183,50 @@ def launch(args):
         """Train for a single step."""
         grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
         (loss, logits), grads = grad_fn(model, batch)
-        metrics.update(loss=loss, logits=logits, labels=batch["label"])
+        log_probs = nnx.log_softmax(logits, axis=-1)
+        ece = evaluate_ece(log_probs, batch["label"])
+        metrics.update(loss=loss, ece=ece, logits=logits, labels=batch["label"])
         optimizer.update(grads)
 
     @nnx.jit
     def eval_step(model: nnx.Module, metrics: nnx.MultiMetric, batch):
         loss, logits = loss_fn(model, batch)
-        metrics.update(loss=loss, logits=logits, labels=batch["label"])
+        log_probs = nnx.log_softmax(logits, axis=-1)
+        ece = evaluate_ece(log_probs, batch["label"])
+        metrics.update(loss=loss, ece=ece, logits=logits, labels=batch["label"])
 
     @nnx.jit
     def update_batch_stats_step(model: nnx.Module, batch):
         _ = model(batch["image"])
 
-    def eval_swag(swag_state: optax.OptState, metrics: nnx.MultiMetric, key: jax.Array):
-        weight_samples = swag.sample_swag(args.num_swag_samples, key, swag_state)
-        swa_models = []
-        for weight_sample in weight_samples:
-            swa_model = nnx.merge(graphdef, weight_sample, initial_batch_stats)
-            swa_model.train()
-            train_epoch_loader = train_loader.take(train_steps_per_epoch)
-            for train_batch in train_epoch_loader.as_numpy_iterator():
-                update_batch_stats_step(swa_model, train_batch)
+    def eval_swag(swag_state: swag.SWAGState, metrics: nnx.MultiMetric, key: jax.Array):
+        swag_sample_list = swag.sample_swag(args.num_swag_samples, key, swag_state)
+        swa_model_list = []
+        for swag_sample in swag_sample_list:
+            swa_model = nnx.merge(graphdef, swag_sample, initial_batch_stats)
+            if args.norm_type == "bn":
+                swa_model.train()
+                train_epoch_loader = train_loader.take(train_steps_per_epoch)
+                for train_batch in train_epoch_loader.as_numpy_iterator():
+                    update_batch_stats_step(swa_model, train_batch)
             swa_model.eval()
-            swa_models.append(swa_model)
+            swa_model_list.append(swa_model)
         for batch in val_loader.as_numpy_iterator():
             logits_list = []
-            for swa_model in swa_models:
+            for swa_model in swa_model_list:
                 _, logits = loss_fn(swa_model, batch)
-            logits_list.append(logits)
-            _logits = jnp.stack(logits_list)
-            logprobs = nnx.log_softmax(_logits, axis=-1)
+                logits_list.append(logits)
+            logits_list = jnp.stack(logits_list)
+            logprobs = nnx.log_softmax(logits_list, axis=-1)
             ens_logprobs = nnx.logsumexp(logprobs, axis=0) - jnp.log(logprobs.shape[0])
-            ens_nll = -jnp.sum(
-                ens_logprobs * nnx.one_hot(batch["label"], ens_logprobs.shape[-1])
-            ).mean()
-            metrics.update(loss=ens_nll, logits=ens_logprobs, labels=batch["label"])
+            ens_nll = evaluate_nll(ens_logprobs, batch["label"], reduction="mean")
+            ens_ece = evaluate_ece(ens_logprobs, batch["label"])
+            metrics.update(
+                loss=ens_nll, ece=ens_ece, logits=ens_logprobs, labels=batch["label"]
+            )
 
     with wandb.init(project="resnet-swag-cifar10", config=args) as run:
-        for epoch in tqdm(range(args.optim_num_epochs)):
+        for epoch in tqdm(range(start_epoch, args.optim_num_epochs)):
             model.train()
             train_epoch_loader = train_loader.take(train_steps_per_epoch)
             for batch in train_epoch_loader.as_numpy_iterator():
@@ -157,6 +246,8 @@ def launch(args):
                 f"test/{metric}": value for metric, value in metrics.compute().items()
             }
             metrics.reset()  # Reset the metrics for the next training epoch.
+
+            step = epoch + 1
             run.log(
                 {
                     **train_metrics_dict,
@@ -164,10 +255,10 @@ def launch(args):
                     "lr": scheduler(int(optimizer.step.value)).item(),
                     "steps": optimizer.step.value,
                 },
-                step=epoch,
+                step=step,
             )
             if epoch >= args.start_swa_epoch and (
-                epoch % args.eval_swag_freq == 0 or epoch == args.optim_num_epochs - 1
+                step % args.eval_swag_freq == 0 or step == args.optim_num_epochs
             ):
                 swag_state = optimizer.opt_state[-1]
                 swag_sample_subkey = jax.random.fold_in(swag_sample_key, swag_state.n)
@@ -180,10 +271,24 @@ def launch(args):
                     "test/num_swa_iterates": swag_state.n.item(),
                 }
                 metrics.reset()
-                run.log({**swag_test_metrics_dict}, step=epoch)
+                run.log({**swag_test_metrics_dict}, step=step)
 
-            save_model_state(model, os.path.abspath(f"{args.save_dir}/{epoch+1:03d}"))
-            save_opt_state(optimizer, os.path.abspath(f"{args.save_dir}/{epoch+1:03d}"))
+            # Save checkpoint with specified frequency
+            if (
+                step % args.checkpoint_every_n_epochs == 0
+                or step == args.optim_num_epochs
+            ):
+                save_checkpoint(
+                    checkpoint_manager,
+                    model,
+                    optimizer,
+                    step,
+                    metrics={**train_metrics_dict, **test_metrics_dict},
+                )
+
+        swag_state = optimizer.opt_state[-1]
+        save_swag_state(swag_state, args.swag_save_dir, args.model_id)
+        print(f"Training completed. SWAG state saved to {args.swag_save_dir}")
 
 
 def main():
@@ -192,7 +297,8 @@ def main():
         "--model_depth", default=32, type=int, choices=[20, 32, 44, 56, 110]
     )
     parser.add_argument("--batch_size", default=256, type=int)
-    parser.add_argument("--seed", default=42, type=int)
+    parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
+    parser.add_argument("--seed", default=5, type=int)
 
     parser.add_argument("--optim_lr", default=0.1, type=float)
     parser.add_argument("--optim_swa_lr", default=0.01, type=float)
@@ -202,16 +308,53 @@ def main():
     parser.add_argument("--warmup_epochs", default=10, type=int)
     parser.add_argument("--start_swa_epoch", default=800, type=int)
     parser.add_argument("--swag_freq", default=1, type=int)
-    parser.add_argument("--swag_rank", default=10, type=int)
+    parser.add_argument("--swag_rank", default=20, type=int)
     parser.add_argument("--eval_swag_freq", default=10, type=int)
-    parser.add_argument("--num_swag_samples", default=5, type=int)
+    parser.add_argument("--num_swag_samples", default=20, type=int)
 
     parser.add_argument("--save_dir", default="./checkpoint/swag", type=str)
+    parser.add_argument(
+        "--swag_save_dir",
+        default="./checkpoint/swag_state",
+        type=str,
+        help="Directory to save SWAG state separately",
+    )
+    parser.add_argument(
+        "--model_id",
+        default=None,
+        type=str,
+        help="Model identifier for multi-model training",
+    )
+    parser.add_argument(
+        "--max_checkpoints_to_keep",
+        default=5,
+        type=int,
+        help="Maximum number of checkpoints to keep (older ones will be deleted)",
+    )
+    parser.add_argument(
+        "--checkpoint_every_n_epochs",
+        default=10,
+        type=int,
+        help="Save checkpoint every N epochs",
+    )
+    parser.add_argument(
+        "--resume_dir",
+        default=None,
+        type=str,
+        help="Path to checkpoint directory to resume from",
+    )
 
     args = parser.parse_args()
-    now = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    KST = timezone(timedelta(hours=9))
+    now = datetime.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
     save_dir = os.path.join(args.save_dir, now)
-    args.save_dir = save_dir
+    args.save_dir = os.path.abspath(save_dir)
+
+    swag_save_dir = os.path.join(args.swag_save_dir, now)
+    args.swag_save_dir = os.path.abspath(swag_save_dir)
+
+    if args.resume_dir:
+        args.resume_dir = os.path.abspath(args.resume_dir)
     launch(args)
 
 
