@@ -47,9 +47,9 @@ class BasicBlock(nnx.Module):
 
         # Choose normalization type
         if norm_type == "bn":
-            self.bn1 = nnx.BatchNorm(planes, momentum=0.9, rngs=rngs)
+            self.norm1 = nnx.BatchNorm(planes, momentum=0.9, rngs=rngs)
         elif norm_type == "frn":
-            self.bn1 = FilterResponseNorm(planes, rngs=rngs)
+            self.norm1 = FilterResponseNorm(planes, rngs=rngs)
         else:
             raise ValueError(f"Unknown normalization type: {norm_type}")
 
@@ -65,9 +65,9 @@ class BasicBlock(nnx.Module):
 
         # Choose normalization type for second layer
         if norm_type == "bn":
-            self.bn2 = nnx.BatchNorm(planes, momentum=0.9, rngs=rngs)
+            self.norm2 = nnx.BatchNorm(planes, momentum=0.9, rngs=rngs)
         elif norm_type == "frn":
-            self.bn2 = FilterResponseNorm(planes, rngs=rngs)
+            self.norm2 = FilterResponseNorm(planes, rngs=rngs)
         else:
             raise ValueError(f"Unknown normalization type: {norm_type}")
 
@@ -109,8 +109,8 @@ class BasicBlock(nnx.Module):
                 )
 
     def __call__(self, x):
-        out = nnx.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = nnx.relu(self.norm1(self.conv1(x)))
+        out = self.norm2(self.conv2(out))
         out += self.shortcut(x)
         out = nnx.relu(out)
         return out
@@ -135,9 +135,9 @@ class ResNet(nnx.Module):
 
         # Choose normalization type for first layer
         if norm_type == "bn":
-            self.bn1 = nnx.BatchNorm(16, momentum=0.9, rngs=rngs)
+            self.norm1 = nnx.BatchNorm(16, momentum=0.9, rngs=rngs)
         elif norm_type == "frn":
-            self.bn1 = FilterResponseNorm(16, rngs=rngs)
+            self.norm1 = FilterResponseNorm(16, rngs=rngs)
         else:
             raise ValueError(f"Unknown normalization type: {norm_type}")
 
@@ -166,7 +166,7 @@ class ResNet(nnx.Module):
         return nnx.Sequential(*layers)
 
     def __call__(self, x):
-        out = nnx.relu(self.bn1(self.conv1(x)))
+        out = nnx.relu(self.norm1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
@@ -176,49 +176,49 @@ class ResNet(nnx.Module):
             strides=(out.shape[-2], out.shape[-2]),
         )
         out = out.reshape(x.shape[0], -1)
+        # Store intermediate feature representation
         self.sow(
             nnx.Intermediate,
             "feature",
             out,
-            init_fn=lambda: jnp.zeros_like(out),
-            reduce_fn=lambda prev, curr: curr,
+            reduce_fn=lambda prev, curr: curr,  # Always keep only the current value
         )
         out = self.linear(out)
         return out
 
 
 # PyTorch: def resnet20(): return ResNet(BasicBlock, [3, 3, 3])
-def resnet20(norm_type="bn", rngs: nnx.Rngs = None):
+def resnet20(norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(BasicBlock, [3, 3, 3], norm_type=norm_type, rngs=rngs)
 
 
-def resnet32(norm_type="bn", rngs: nnx.Rngs = None):
+def resnet32(norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(BasicBlock, [5, 5, 5], norm_type=norm_type, rngs=rngs)
 
 
-def resnet44(norm_type="bn", rngs: nnx.Rngs = None):
+def resnet44(norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(BasicBlock, [7, 7, 7], norm_type=norm_type, rngs=rngs)
 
 
-def resnet56(norm_type="bn", rngs: nnx.Rngs = None):
+def resnet56(norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(BasicBlock, [9, 9, 9], norm_type=norm_type, rngs=rngs)
 
 
-def resnet110(norm_type="bn", rngs: nnx.Rngs = None):
+def resnet110(norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(BasicBlock, [18, 18, 18], norm_type=norm_type, rngs=rngs)
 
 
-def resnet1202(norm_type="bn", rngs: nnx.Rngs = None):
+def resnet1202(norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(BasicBlock, [200, 200, 200], norm_type=norm_type, rngs=rngs)
