@@ -14,38 +14,7 @@ import models.resnet as resnet
 from dataloader_tfds import build_dataloader
 import swag
 from eval import evaluate_ece, evaluate_nll
-
-
-def save_model_state(model: nnx.Module, path: str):
-    state = nnx.state(model).to_pure_dict()
-    # Save the parameters
-    checkpointer = orbax.PyTreeCheckpointer()
-    checkpointer.save(f"{path}/model", state)
-
-
-def save_opt_state(optimizer: nnx.Optimizer, path: str):
-    state = nnx.state(optimizer).to_pure_dict()
-    checkpointer = orbax.PyTreeCheckpointer()
-    checkpointer.save(f"{path}/opt", state)
-
-
-def load_model_state(model_cls, path):
-    checkpointer = orbax.PyTreeCheckpointer()
-    restored_pure_dict = checkpointer.restore(f"{path}/model")
-    abstract_model = nnx.eval_shape(lambda: model_cls(rngs=nnx.Rngs(0)))
-    graphdef, abstract_state = nnx.split(abstract_model)
-    nnx.replace_by_pure_dict(abstract_state, restored_pure_dict)
-    model = nnx.merge(graphdef, abstract_state)
-    return model
-
-
-def load_opt_state(optimizer, path):
-    checkpointer = orbax.PyTreeCheckpointer()
-    restored_pure_dict = checkpointer.restore(f"{path}/opt")
-    graphdef, abstract_state = nnx.split(optimizer)
-    nnx.replace_by_pure_dict(abstract_state, restored_pure_dict)
-    optimizer = nnx.merge(graphdef, abstract_state)
-    return optimizer
+from train_swag import load_checkpoint
 
 
 def launch(args):
@@ -61,20 +30,18 @@ def launch(args):
     graphdef, _, initial_batch_stats = nnx.split(
         abstract_model, nnx.Param, nnx.BatchStat
     )
-    swag_dir = "/home/chlee973/EDFM/checkpoint/multi_swag_collection/2025-08-16_03-26-03/swag_state_01_seed_42/2025-08-16_12-26-09/model_model_01_seed_42"
     checkpoint_manager = orbax.CheckpointManager(
-        str(swag_dir),
+        args.swag_dir,
         orbax.PyTreeCheckpointer(),
         orbax.CheckpointManagerOptions(max_to_keep=1, create=False),
     )
     restored_state = checkpoint_manager.restore(0)
     swag_state_dict = restored_state["swag_state"]
     swag_state = swag.SWAGState(**swag_state_dict)
-    nnx.display(swag_state)
     train_steps_per_epoch = 50000 // args.batch_size
     metrics = nnx.MultiMetric(
         accuracy=nnx.metrics.Accuracy(),
-        loss=nnx.metrics.Average("loss"),
+        nll=nnx.metrics.Average("nll"),
         ece=nnx.metrics.Average("ece"),
     )
 
@@ -91,7 +58,7 @@ def launch(args):
         log_probs = nnx.log_softmax(logits)
         nll = evaluate_nll(log_probs, batch["label"])
         ece = evaluate_ece(log_probs, batch["label"])
-        metrics.update(loss=loss, ece=ece, logits=log_probs, labels=batch["label"])
+        metrics.update(nll=nll, ece=ece, logits=log_probs, labels=batch["label"])
 
     @nnx.jit
     def update_batch_stats_step(model: nnx.Module, batch):
@@ -110,7 +77,7 @@ def launch(args):
             eval_step(swa_model, metrics, batch)
 
     def eval_swag(swag_state, metrics: nnx.MultiMetric, key: jax.Array):
-        swag_sample_list = swag.sample_swag(args.num_swag_samples, key, swag_state)
+        swag_sample_list = swag.sample_swag_diag(args.num_swag_samples, key, swag_state)
         swa_model_list = []
         for swag_sample in swag_sample_list:
             # Create a fresh model and update its parameters
@@ -133,25 +100,23 @@ def launch(args):
             ens_nll = evaluate_nll(ens_logprobs, batch["label"], reduction="mean")
             ens_ece = evaluate_ece(ens_logprobs, batch["label"])
             metrics.update(
-                loss=ens_nll, ece=ens_ece, logits=ens_logprobs, labels=batch["label"]
+                nll=ens_nll, ece=ens_ece, logits=ens_logprobs, labels=batch["label"]
             )
 
-    with wandb.init(project="resnet-swag-eval-cifar10", config=args) as run:
-        eval_swa(swag_state, metrics)
-        swa_test_metrics_dict = {
-            **{f"swa/{metric}": value for metric, value in metrics.compute().items()},
-            "swa/iterates": swag_state.n,
-        }
-        metrics.reset()
-        run.log({**swa_test_metrics_dict}, step=0)
-        eval_swag(swag_state, metrics, swag_sample_key)
-        swag_test_metrics_dict = {
-            **{f"swag/{metric}": value for metric, value in metrics.compute().items()},
-            "swag/iterates": swag_state.n,
-            "swag/num_samples": args.num_swag_samples,
-        }
-        metrics.reset()
-        run.log({**swag_test_metrics_dict}, step=0)
+    eval_swa(swag_state, metrics)
+    swa_test_metrics_dict = {
+        **{f"swa/{metric}": value for metric, value in metrics.compute().items()},
+        "swa/iterates": swag_state.n,
+    }
+    metrics.reset()
+    eval_swag(swag_state, metrics, swag_sample_key)
+    swag_test_metrics_dict = {
+        **{f"swag/{metric}": value for metric, value in metrics.compute().items()},
+        "swag/iterates": swag_state.n,
+        "swag/num_samples": args.num_swag_samples,
+    }
+    metrics.reset()
+    print({**swa_test_metrics_dict, **swag_test_metrics_dict})
 
 
 def main():
@@ -173,12 +138,11 @@ def main():
     parser.add_argument("--swag_freq", default=1, type=int)
     parser.add_argument("--swag_rank", default=20, type=int)
     parser.add_argument("--eval_swag_freq", default=10, type=int)
-    parser.add_argument("--num_swag_samples", default=20, type=int)
+    parser.add_argument("--num_swag_samples", default=1, type=int)
 
-    parser.add_argument("--save_dir", default="./1000", type=str)
+    parser.add_argument("--swag_dir", default=None, type=str)
 
     args = parser.parse_args()
-    args.save_dir = os.path.abspath(args.save_dir)
     launch(args)
 
 

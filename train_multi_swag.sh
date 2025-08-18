@@ -64,8 +64,8 @@ for i in $(seq 1 $NUM_MODELS); do
         --save_dir "$temp_checkpoint_dir" \
         --swag_save_dir "$temp_swag_dir" \
         --model_id "model_${model_id}_seed_${seed}" \
-        --checkpoint_every_n_epochs 100 \
-        --max_checkpoints_to_keep 1
+        --checkpoint_every_n_epochs 10 \
+        --max_checkpoints_to_keep 30
     
     if [ $? -eq 0 ]; then
         echo "Model ${i} training completed successfully"
@@ -78,7 +78,7 @@ for i in $(seq 1 $NUM_MODELS); do
         fi
         
         # Clean up checkpoint directory to save space
-        rm -rf "$temp_checkpoint_dir"
+        # rm -rf "$temp_checkpoint_dir"
         
     else
         echo "Model ${i} training failed"

@@ -6,7 +6,7 @@ PIXEL_STD = (0.229, 0.224, 0.225)
 SEED = 42
 
 
-def build_dataloader(batch_size):
+def build_dataloader(batch_size, augment=True):
     tf.random.set_seed(SEED)  # Set the random seed for reproducibility.
     train_ds: tf.data.Dataset = tfds.load("cifar10", split="train")
     test_ds: tf.data.Dataset = tfds.load("cifar10", split="test")
@@ -28,11 +28,17 @@ def build_dataloader(batch_size):
         image = (image - mean) / std
         return {"image": image, "label": sample["label"]}
 
+    def pure_normalization(sample):
+        image = tf.cast(sample["image"], tf.float32) / 255.0
+        return {"image": image, "label": sample["label"]}
+
     train_ds = train_ds.shuffle(50000).repeat()
-    train_ds = train_ds.map(preprocess_train, num_parallel_calls=tf.data.AUTOTUNE)
+    if augment:
+        train_ds = train_ds.map(preprocess_train, num_parallel_calls=tf.data.AUTOTUNE)
+    else:
+        train_ds = train_ds.map(pure_normalization, num_parallel_calls=tf.data.AUTOTUNE)
     train_ds = train_ds.batch(batch_size, drop_remainder=True)
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
-
     test_ds = test_ds.map(preprocess_eval, num_parallel_calls=tf.data.AUTOTUNE)
     test_ds = test_ds.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 

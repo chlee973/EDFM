@@ -165,7 +165,7 @@ class ResNet(nnx.Module):
 
         return nnx.Sequential(*layers)
 
-    def __call__(self, x):
+    def __call__(self, x, get_feature=False):
         out = nnx.relu(self.norm1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)
@@ -176,14 +176,10 @@ class ResNet(nnx.Module):
             strides=(out.shape[-2], out.shape[-2]),
         )
         out = out.reshape(x.shape[0], -1)
-        # Store intermediate feature representation
-        self.sow(
-            nnx.Intermediate,
-            "feature",
-            out,
-            reduce_fn=lambda prev, curr: curr,  # Always keep only the current value
-        )
+        feature = out
         out = self.linear(out)
+        if get_feature:
+            return out, feature
         return out
 
 
