@@ -3,13 +3,12 @@ import tensorflow_datasets as tfds
 
 PIXEL_MEAN = (0.485, 0.456, 0.406)
 PIXEL_STD = (0.229, 0.224, 0.225)
-SEED = 42
 
 
-def build_dataloader(batch_size, augment=True):
-    tf.random.set_seed(SEED)  # Set the random seed for reproducibility.
-    train_ds: tf.data.Dataset = tfds.load("cifar10", split="train")
-    test_ds: tf.data.Dataset = tfds.load("cifar10", split="test")
+def build_dataloader(ds_name, batch_size, seed=42, augment=True):
+    tf.random.set_seed(seed)  # Set the random seed for reproducibility.
+    train_ds: tf.data.Dataset = tfds.load(ds_name, split="train")
+    test_ds: tf.data.Dataset = tfds.load(ds_name, split="test")
 
     mean = tf.constant(PIXEL_MEAN, shape=(1, 1, 3), dtype=tf.float32)
     std = tf.constant(PIXEL_STD, shape=(1, 1, 3), dtype=tf.float32)
@@ -32,7 +31,11 @@ def build_dataloader(batch_size, augment=True):
         image = tf.cast(sample["image"], tf.float32) / 255.0
         return {"image": image, "label": sample["label"]}
 
-    train_ds = train_ds.shuffle(50000).repeat()
+    info = tfds.builder(ds_name).info
+    train_ds_size = info.splits["train"].num_examples
+    train_steps_per_epoch = train_ds_size // batch_size
+
+    train_ds = train_ds.shuffle(train_ds_size).repeat()
     if augment:
         train_ds = train_ds.map(preprocess_train, num_parallel_calls=tf.data.AUTOTUNE)
     else:
@@ -42,4 +45,4 @@ def build_dataloader(batch_size, augment=True):
     test_ds = test_ds.map(preprocess_eval, num_parallel_calls=tf.data.AUTOTUNE)
     test_ds = test_ds.batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
-    return train_ds, test_ds
+    return train_ds, test_ds, train_steps_per_epoch

@@ -17,6 +17,8 @@ echo "Output directory: ${FINAL_OUTPUT_DIR}"
 MODEL_DEPTH=32
 BATCH_SIZE=256
 NORM_TYPE="frn"
+DS_NAME="cifar10"
+NUM_CLASSES=10
 OPTIM_LR=0.1
 OPTIM_SWA_LR=0.01
 OPTIM_MOMENTUM=0.9
@@ -50,6 +52,8 @@ for i in $(seq 1 $NUM_MODELS); do
         --model_depth $MODEL_DEPTH \
         --batch_size $BATCH_SIZE \
         --norm_type $NORM_TYPE \
+        --ds_name $DS_NAME \
+        --num_classes $NUM_CLASSES \
         --optim_lr $OPTIM_LR \
         --optim_swa_lr $OPTIM_SWA_LR \
         --optim_momentum $OPTIM_MOMENTUM \

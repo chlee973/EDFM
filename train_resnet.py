@@ -11,6 +11,7 @@ import orbax.checkpoint as orbax
 from typing import Optional
 import models.resnet as resnet
 from dataloader_tfds import build_dataloader
+from eval import evaluate_ece
 
 
 def create_checkpoint_manager(
@@ -67,12 +68,15 @@ def load_checkpoint(
 
 
 def launch(args):
-    train_loader, val_loader = build_dataloader(args.batch_size)
+    train_loader, val_loader, train_steps_per_epoch = build_dataloader(
+        args.ds_name, args.batch_size, args.seed
+    )
 
     model_arch = resnet.__dict__[f"resnet{args.model_depth}"]
-    model = model_arch(norm_type=args.norm_type, rngs=nnx.Rngs(args.seed))
+    model = model_arch(
+        norm_type=args.norm_type, num_classes=args.num_classes, rngs=nnx.Rngs(args.seed)
+    )
 
-    train_steps_per_epoch = 50000 // args.batch_size
     schedule = optax.join_schedules(
         schedules=[
             optax.linear_schedule(
@@ -98,7 +102,8 @@ def launch(args):
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
     metrics = nnx.MultiMetric(
         accuracy=nnx.metrics.Accuracy(),
-        loss=nnx.metrics.Average("loss"),
+        nll=nnx.metrics.Average("nll"),
+        ece=nnx.metrics.Average("ece"),
     )
 
     # Create checkpoint manager
@@ -130,15 +135,19 @@ def launch(args):
         """Train for a single step."""
         grad_fn = nnx.value_and_grad(loss_fn, has_aux=True)
         (loss, logits), grads = grad_fn(model, batch)
-        metrics.update(loss=loss, logits=logits, labels=batch["label"])
+        logprobs = nnx.log_softmax(logits, axis=-1)
+        ece = evaluate_ece(logprobs, batch["label"])
+        metrics.update(nll=loss, ece=ece, logits=logits, labels=batch["label"])
         optimizer.update(grads)
 
     @nnx.jit
     def eval_step(model: nnx.Module, metrics: nnx.MultiMetric, batch):
         loss, logits = loss_fn(model, batch)
-        metrics.update(loss=loss, logits=logits, labels=batch["label"])
+        logprobs = nnx.log_softmax(logits, axis=-1)
+        ece = evaluate_ece(logprobs, batch["label"])
+        metrics.update(nll=loss, ece=ece, logits=logits, labels=batch["label"])
 
-    with wandb.init(project="resnet-cifar10", config=args) as run:
+    with wandb.init(project=f"resnet-{args.ds_name}", config=args) as run:
         for epoch in tqdm(range(start_epoch, args.optim_num_epochs)):
             model.train()
             train_epoch_loader = train_loader.take(train_steps_per_epoch)
@@ -191,12 +200,16 @@ def main():
     )
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
+    parser.add_argument(
+        "--ds_name", default="cifar100", type=str, choices=["cifar10", "cifar100"]
+    )
+    parser.add_argument("--num_classes", default=100, type=int)
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--optim_lr", default=0.1, type=float)
     parser.add_argument("--optim_momentum", default=0.9, type=float)
     parser.add_argument("--optim_weight_decay", default=1e-4, type=float)
-    parser.add_argument("--optim_num_epochs", default=800, type=int)
-    parser.add_argument("--warmup_epochs", default=10, type=int)
+    parser.add_argument("--optim_num_epochs", default=200, type=int)
+    parser.add_argument("--warmup_epochs", default=5, type=int)
     parser.add_argument("--save_dir", default="./checkpoint/resnet", type=str)
     parser.add_argument(
         "--max_checkpoints_to_keep",

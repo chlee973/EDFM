@@ -19,13 +19,17 @@ from train_swag import load_checkpoint
 
 def launch(args):
     model_key, swag_sample_key = jax.random.split(jax.random.key(args.seed))
-    train_loader, val_loader = build_dataloader(args.batch_size)
+    train_loader, val_loader, train_steps_per_epoch = build_dataloader(
+        args.ds_name, args.batch_size, args.seed
+    )
 
     # The saved checkpoint appears to use BatchNorm based on the structure
     # Let's force use of BatchNorm to match the checkpoint
     model_arch = resnet.__dict__[f"resnet{args.model_depth}"]
     abstract_model = nnx.eval_shape(
-        lambda: model_arch(norm_type=args.norm_type, rngs=nnx.Rngs(0))
+        lambda: model_arch(
+            norm_type=args.norm_type, num_classes=args.num_classes, rngs=nnx.Rngs(0)
+        )
     )
     graphdef, _, initial_batch_stats = nnx.split(
         abstract_model, nnx.Param, nnx.BatchStat
@@ -38,7 +42,7 @@ def launch(args):
     restored_state = checkpoint_manager.restore(0)
     swag_state_dict = restored_state["swag_state"]
     swag_state = swag.SWAGState(**swag_state_dict)
-    train_steps_per_epoch = 50000 // args.batch_size
+
     metrics = nnx.MultiMetric(
         accuracy=nnx.metrics.Accuracy(),
         nll=nnx.metrics.Average("nll"),
@@ -126,6 +130,10 @@ def main():
     )
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
+    parser.add_argument(
+        "--ds_name", default="cifar10", type=str, choices=["cifar10", "cifar100"]
+    )
+    parser.add_argument("--num_classes", default=10, type=int)
     parser.add_argument("--seed", default=42, type=int)
 
     parser.add_argument("--optim_lr", default=0.1, type=float)
@@ -138,7 +146,7 @@ def main():
     parser.add_argument("--swag_freq", default=1, type=int)
     parser.add_argument("--swag_rank", default=20, type=int)
     parser.add_argument("--eval_swag_freq", default=10, type=int)
-    parser.add_argument("--num_swag_samples", default=1, type=int)
+    parser.add_argument("--num_swag_samples", default=32, type=int)
 
     parser.add_argument("--swag_dir", default=None, type=str)
 

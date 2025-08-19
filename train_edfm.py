@@ -10,7 +10,7 @@ import wandb
 from tqdm import tqdm
 import orbax.checkpoint as ocp
 from typing import Type, Optional
-from models.resnet import resnet32
+import models.resnet
 from models.mlp import MLP
 from models.flowmatching import FlowMatching
 from dataloader_tfds import build_dataloader
@@ -127,13 +127,12 @@ def load_swag_state(
 
 
 def launch(args):
-    fm_key, score_key, train_key, eval_key = jax.random.split(
-        jax.random.key(args.seed), 4
-    )
+    model_key, train_key, eval_key = jax.random.split(jax.random.key(args.seed), 3)
     # Dataloader
     print("Building Dataloader..")
-    train_loader, val_loader = build_dataloader(args.batch_size)
-    train_steps_per_epoch = 50000 // args.batch_size
+    train_loader, val_loader, train_steps_per_epoch = build_dataloader(
+        args.ds_name, args.batch_size, args.seed
+    )
 
     # Prepare teachers
     print("Preparing teachers..")
@@ -144,24 +143,26 @@ def launch(args):
 
     # Define and load resnet (feature extractor)
     print("Loading resnet..")
+    model_arch = models.resnet.__dict__[f"resnet{args.model_depth}"]
     abstract_resnet = nnx.eval_shape(
-        lambda: resnet32(norm_type=args.norm_type, rngs=nnx.Rngs(0))
+        lambda: model_arch(
+            norm_type=args.norm_type, num_classes=args.num_classes, rngs=nnx.Rngs(0)
+        )
     )
     resnet_graphdef, _ = nnx.split(abstract_resnet)
     load_resnet_manager = create_checkpoint_manager(args.resnet_dir, max_to_keep=1)
     resnet = load_resnet(abstract_resnet, load_resnet_manager)
-
     # Build score net
     print("Building score net..")
     score_net = MLP(
         cond_feature_dim=64,
         hidden_dim=256,
         time_embed_dim=32,
-        num_blocks=8,
-        num_classes=10,
-        droprate=0.5,
+        num_blocks=4,
+        num_classes=args.num_classes,
+        droprate=0,
         time_scale=1000.0,
-        rngs=nnx.Rngs(score_key),
+        rngs=nnx.Rngs(model_key),
     )
 
     # Initialize model, optimizers
@@ -169,10 +170,10 @@ def launch(args):
         resnet=resnet,
         score=score_net,
         noise_var=4,
-        num_classes=10,
+        num_classes=args.num_classes,
         eps=0.001,
         base=3,
-        rngs=nnx.Rngs(fm_key),
+        rngs=nnx.Rngs(model_key),
     )
     scheduler = optax.join_schedules(
         schedules=[
@@ -282,7 +283,7 @@ def launch(args):
             ens_nll=ens_nll, ens_ece=ens_ece, logits=ens_logprobs, labels=batch["label"]
         )
 
-    with wandb.init(project="edfm-cifar10", config=args) as run:
+    with wandb.init(project="edfm-cifar10", name=args.exp_name, config=args) as run:
         for epoch in tqdm(range(args.optim_num_epochs)):
             model.train()
             train_epoch_loader = train_loader.take(train_steps_per_epoch)
@@ -339,6 +340,10 @@ def main():
     )
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
+    parser.add_argument(
+        "--ds_name", default="cifar10", type=str, choices=["cifar10", "cifar100"]
+    )
+    parser.add_argument("--num_classes", default=10, type=int)
     parser.add_argument("--seed", default=4, type=int)
 
     parser.add_argument("--optim_lr", default=1e-4, type=float)
@@ -351,8 +356,11 @@ def main():
     parser.add_argument("--num_swag_samples", default=32, type=int)
     parser.add_argument("--sample_num_steps", default=7, type=int)
     parser.add_argument("--mixup_alpha", default=0.4, type=float)
+    parser.add_argument("--exp_name", default=None, type=str)
     parser.add_argument("--save_dir", default="./checkpoint/edfm", type=str)
-    parser.add_argument("--resnet_dir", default="./checkpoint/resnet_feature", type=str)
+    parser.add_argument(
+        "--resnet_dir", default="./checkpoint/resnet/2025-08-19_11-19-13", type=str
+    )
     parser.add_argument(
         "--teacher_dir", default="./checkpoint/multi_swag_collection", type=str
     )

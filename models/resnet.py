@@ -183,41 +183,60 @@ class ResNet(nnx.Module):
         return out
 
 
-# PyTorch: def resnet20(): return ResNet(BasicBlock, [3, 3, 3])
-def resnet20(norm_type="frn", rngs: nnx.Rngs = None):
+def resnet20(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
-    return ResNet(BasicBlock, [3, 3, 3], norm_type=norm_type, rngs=rngs)
+    return ResNet(
+        BasicBlock, [3, 3, 3], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+    )
 
 
-def resnet32(norm_type="frn", rngs: nnx.Rngs = None):
+def resnet32(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
-    return ResNet(BasicBlock, [5, 5, 5], norm_type=norm_type, rngs=rngs)
+    return ResNet(
+        BasicBlock, [5, 5, 5], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+    )
 
 
-def resnet44(norm_type="frn", rngs: nnx.Rngs = None):
+def resnet44(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
-    return ResNet(BasicBlock, [7, 7, 7], norm_type=norm_type, rngs=rngs)
+    return ResNet(
+        BasicBlock, [7, 7, 7], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+    )
 
 
-def resnet56(norm_type="frn", rngs: nnx.Rngs = None):
+def resnet56(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
-    return ResNet(BasicBlock, [9, 9, 9], norm_type=norm_type, rngs=rngs)
+    return ResNet(
+        BasicBlock, [9, 9, 9], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+    )
 
 
-def resnet110(norm_type="frn", rngs: nnx.Rngs = None):
+def resnet110(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
-    return ResNet(BasicBlock, [18, 18, 18], norm_type=norm_type, rngs=rngs)
+    return ResNet(
+        BasicBlock,
+        [18, 18, 18],
+        num_classes=num_classes,
+        norm_type=norm_type,
+        rngs=rngs,
+    )
 
 
-def resnet1202(norm_type="frn", rngs: nnx.Rngs = None):
+def resnet1202(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
-    return ResNet(BasicBlock, [200, 200, 200], norm_type=norm_type, rngs=rngs)
+    return ResNet(
+        BasicBlock,
+        [200, 200, 200],
+        num_classes=num_classes,
+        norm_type=norm_type,
+        rngs=rngs,
+    )
 
 
 def test(net):

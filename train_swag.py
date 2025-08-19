@@ -104,12 +104,16 @@ def load_swag_state(
 
 def launch(args):
     model_key, swag_sample_key = jax.random.split(jax.random.key(args.seed))
-    train_loader, val_loader = build_dataloader(args.batch_size)
+    train_loader, val_loader, train_steps_per_epoch = build_dataloader(
+        args.ds_name, args.batch_size, args.seed
+    )
 
     model_arch = resnet.__dict__[f"resnet{args.model_depth}"]
-    model = model_arch(norm_type=args.norm_type, rngs=nnx.Rngs(model_key))
+    model = model_arch(
+        norm_type=args.norm_type, num_classes=args.num_classes, rngs=nnx.Rngs(model_key)
+    )
     graphdef, _, initial_batch_stats = nnx.split(model, nnx.Param, nnx.BatchStat)
-    train_steps_per_epoch = 50000 // args.batch_size
+
     scheduler = optax.join_schedules(
         schedules=[
             optax.linear_schedule(
@@ -220,7 +224,7 @@ def launch(args):
                 loss=ens_nll, ece=ens_ece, logits=ens_logprobs, labels=batch["label"]
             )
 
-    with wandb.init(project="resnet-swag-cifar10", config=args) as run:
+    with wandb.init(project=f"resnet-swag-{args.ds_name}", config=args) as run:
         for epoch in tqdm(range(start_epoch, args.optim_num_epochs)):
             model.train()
             train_epoch_loader = train_loader.take(train_steps_per_epoch)
@@ -293,6 +297,10 @@ def main():
     )
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
+    parser.add_argument(
+        "--ds_name", default="cifar10", type=str, choices=["cifar10", "cifar100"]
+    )
+    parser.add_argument("--num_classes", default=10, type=int)
     parser.add_argument("--seed", default=5, type=int)
 
     parser.add_argument("--optim_lr", default=0.1, type=float)
@@ -342,11 +350,12 @@ def main():
     args = parser.parse_args()
     KST = timezone(timedelta(hours=9))
     now = datetime.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
-    save_dir = os.path.join(args.save_dir, now)
-    args.save_dir = os.path.abspath(save_dir)
+    args.save_dir = os.path.join(args.save_dir, now)
+    args.save_dir = os.path.abspath(args.save_dir)
 
-    swag_save_dir = os.path.join(args.swag_save_dir, now)
-    args.swag_save_dir = os.path.abspath(swag_save_dir)
+    if not args.model_id:
+        args.swag_save_dir = os.path.join(args.swag_save_dir, now)
+    args.swag_save_dir = os.path.abspath(args.swag_save_dir)
 
     if args.resume_dir:
         args.resume_dir = os.path.abspath(args.resume_dir)
