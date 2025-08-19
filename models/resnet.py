@@ -118,14 +118,22 @@ class BasicBlock(nnx.Module):
 
 class ResNet(nnx.Module):
     def __init__(
-        self, block, num_blocks, num_classes=10, norm_type="frn", *, rngs: nnx.Rngs
+        self,
+        block,
+        num_blocks,
+        num_classes=10,
+        width_factor=1,
+        norm_type="frn",
+        *,
+        rngs: nnx.Rngs,
     ):
-        self.in_planes = 16
+        self.width_factor = width_factor
+        self.in_planes = 16 * self.width_factor
         self.norm_type = norm_type
 
         self.conv1 = nnx.Conv(
             3,
-            16,
+            16 * self.width_factor,
             kernel_size=(3, 3),
             strides=1,
             padding="SAME",
@@ -135,17 +143,23 @@ class ResNet(nnx.Module):
 
         # Choose normalization type for first layer
         if norm_type == "bn":
-            self.norm1 = nnx.BatchNorm(16, momentum=0.9, rngs=rngs)
+            self.norm1 = nnx.BatchNorm(16 * self.width_factor, momentum=0.9, rngs=rngs)
         elif norm_type == "frn":
-            self.norm1 = FilterResponseNorm(16, rngs=rngs)
+            self.norm1 = FilterResponseNorm(16 * self.width_factor, rngs=rngs)
         else:
             raise ValueError(f"Unknown normalization type: {norm_type}")
 
-        self.layer1 = self._make_layer(block, 16, num_blocks[0], stride=1, rngs=rngs)
-        self.layer2 = self._make_layer(block, 32, num_blocks[1], stride=2, rngs=rngs)
-        self.layer3 = self._make_layer(block, 64, num_blocks[2], stride=2, rngs=rngs)
+        self.layer1 = self._make_layer(
+            block, 16 * self.width_factor, num_blocks[0], stride=1, rngs=rngs
+        )
+        self.layer2 = self._make_layer(
+            block, 32 * self.width_factor, num_blocks[1], stride=2, rngs=rngs
+        )
+        self.layer3 = self._make_layer(
+            block, 64 * self.width_factor, num_blocks[2], stride=2, rngs=rngs
+        )
 
-        self.linear = nnx.Linear(64, num_classes, rngs=rngs)
+        self.linear = nnx.Linear(64 * self.width_factor, num_classes, rngs=rngs)
 
     def _make_layer(self, block, planes, num_blocks, stride, *, rngs: nnx.Rngs):
         strides = [stride] + [1] * (num_blocks - 1)
@@ -183,39 +197,59 @@ class ResNet(nnx.Module):
         return out
 
 
-def resnet20(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
+def resnet20(num_classes, norm_type="frn", width_factor=1, rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(
-        BasicBlock, [3, 3, 3], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+        BasicBlock,
+        [3, 3, 3],
+        num_classes=num_classes,
+        norm_type=norm_type,
+        width_factor=width_factor,
+        rngs=rngs,
     )
 
 
-def resnet32(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
+def resnet32(num_classes, norm_type="frn", width_factor=1, rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(
-        BasicBlock, [5, 5, 5], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+        BasicBlock,
+        [5, 5, 5],
+        num_classes=num_classes,
+        norm_type=norm_type,
+        width_factor=width_factor,
+        rngs=rngs,
     )
 
 
-def resnet44(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
+def resnet44(num_classes, norm_type="frn", width_factor=1, rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(
-        BasicBlock, [7, 7, 7], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+        BasicBlock,
+        [7, 7, 7],
+        num_classes=num_classes,
+        norm_type=norm_type,
+        width_factor=width_factor,
+        rngs=rngs,
     )
 
 
-def resnet56(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
+def resnet56(num_classes, norm_type="frn", width_factor=1, rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(
-        BasicBlock, [9, 9, 9], num_classes=num_classes, norm_type=norm_type, rngs=rngs
+        BasicBlock,
+        [9, 9, 9],
+        num_classes=num_classes,
+        norm_type=norm_type,
+        width_factor=width_factor,
+        rngs=rngs,
     )
 
 
-def resnet110(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
+def resnet110(num_classes, norm_type="frn", width_factor=1, rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(
@@ -223,11 +257,12 @@ def resnet110(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
         [18, 18, 18],
         num_classes=num_classes,
         norm_type=norm_type,
+        width_factor=width_factor,
         rngs=rngs,
     )
 
 
-def resnet1202(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
+def resnet1202(num_classes, norm_type="frn", width_factor=1, rngs: nnx.Rngs = None):
     if rngs is None:
         rngs = nnx.Rngs(0)
     return ResNet(
@@ -235,6 +270,7 @@ def resnet1202(num_classes, norm_type="frn", rngs: nnx.Rngs = None):
         [200, 200, 200],
         num_classes=num_classes,
         norm_type=norm_type,
+        width_factor=width_factor,
         rngs=rngs,
     )
 

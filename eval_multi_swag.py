@@ -10,7 +10,7 @@ import wandb
 from tqdm import tqdm
 import orbax.checkpoint as ocp
 from typing import Type, Optional, List
-from models.resnet import resnet32
+import models.resnet
 from models.mlp import MLP
 from models.flowmatching import FlowMatching
 from dataloader_tfds import build_dataloader
@@ -23,11 +23,17 @@ def launch(args):
     swag_sample_key, _, _ = jax.random.split(jax.random.key(args.seed), 3)
     # Dataloader
     print("Building Dataloader..")
-    train_loader, val_loader = build_dataloader(args.batch_size)
-    train_steps_per_epoch = 50000 // args.batch_size
-
+    train_loader, val_loader, train_steps_per_epoch = build_dataloader(
+        args.ds_name, args.batch_size, args.seed
+    )
+    model_arch = models.resnet.__dict__[f"resnet{args.model_depth}"]
     abstract_resnet = nnx.eval_shape(
-        lambda: resnet32(norm_type=args.norm_type, rngs=nnx.Rngs(0))
+        lambda: model_arch(
+            norm_type=args.norm_type,
+            width_factor=args.model_width_factor,
+            num_classes=args.num_classes,
+            rngs=nnx.Rngs(0),
+        )
     )
     resnet_graphdef, _ = nnx.split(abstract_resnet)
 
@@ -93,9 +99,14 @@ def main():
     parser.add_argument(
         "--model_depth", default=32, type=int, choices=[20, 32, 44, 56, 110]
     )
+    parser.add_argument("--model_width_factor", default=1, type=int)
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
-    parser.add_argument("--seed", default=4, type=int)
+    parser.add_argument(
+        "--ds_name", default="cifar10", type=str, choices=["cifar10", "cifar100"]
+    )
+    parser.add_argument("--num_classes", default=10, type=int)
+    parser.add_argument("--seed", default=42, type=int)
 
     parser.add_argument("--optim_lr", default=1e-4, type=float)
     parser.add_argument("--optim_momentum", default=0.9, type=float)

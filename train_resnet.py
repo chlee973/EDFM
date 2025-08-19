@@ -74,7 +74,10 @@ def launch(args):
 
     model_arch = resnet.__dict__[f"resnet{args.model_depth}"]
     model = model_arch(
-        norm_type=args.norm_type, num_classes=args.num_classes, rngs=nnx.Rngs(args.seed)
+        norm_type=args.norm_type,
+        width_factor=args.model_width_factor,
+        num_classes=args.num_classes,
+        rngs=nnx.Rngs(args.seed),
     )
 
     schedule = optax.join_schedules(
@@ -147,7 +150,9 @@ def launch(args):
         ece = evaluate_ece(logprobs, batch["label"])
         metrics.update(nll=loss, ece=ece, logits=logits, labels=batch["label"])
 
-    with wandb.init(project=f"resnet-{args.ds_name}", config=args) as run:
+    with wandb.init(
+        project=f"resnet-{args.ds_name}", name=args.exp_name, config=args
+    ) as run:
         for epoch in tqdm(range(start_epoch, args.optim_num_epochs)):
             model.train()
             train_epoch_loader = train_loader.take(train_steps_per_epoch)
@@ -198,18 +203,20 @@ def main():
     parser.add_argument(
         "--model_depth", default=32, type=int, choices=[20, 32, 44, 56, 110]
     )
+    parser.add_argument("--model_width_factor", default=2, type=int)
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
     parser.add_argument(
-        "--ds_name", default="cifar100", type=str, choices=["cifar10", "cifar100"]
+        "--ds_name", default="cifar10", type=str, choices=["cifar10", "cifar100"]
     )
-    parser.add_argument("--num_classes", default=100, type=int)
+    parser.add_argument("--num_classes", default=10, type=int, choices=[10, 100])
     parser.add_argument("--seed", default=42, type=int)
     parser.add_argument("--optim_lr", default=0.1, type=float)
     parser.add_argument("--optim_momentum", default=0.9, type=float)
     parser.add_argument("--optim_weight_decay", default=1e-4, type=float)
     parser.add_argument("--optim_num_epochs", default=200, type=int)
     parser.add_argument("--warmup_epochs", default=5, type=int)
+    parser.add_argument("--exp_name", default=None, type=str)
     parser.add_argument("--save_dir", default="./checkpoint/resnet", type=str)
     parser.add_argument(
         "--max_checkpoints_to_keep",

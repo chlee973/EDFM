@@ -28,7 +28,10 @@ def launch(args):
     model_arch = resnet.__dict__[f"resnet{args.model_depth}"]
     abstract_model = nnx.eval_shape(
         lambda: model_arch(
-            norm_type=args.norm_type, num_classes=args.num_classes, rngs=nnx.Rngs(0)
+            norm_type=args.norm_type,
+            width_factor=args.model_width_factor,
+            num_classes=args.num_classes,
+            rngs=nnx.Rngs(0),
         )
     )
     graphdef, _, initial_batch_stats = nnx.split(
@@ -128,6 +131,7 @@ def main():
     parser.add_argument(
         "--model_depth", default=32, type=int, choices=[20, 32, 44, 56, 110]
     )
+    parser.add_argument("--model_width_factor", default=1, type=int)
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
     parser.add_argument(

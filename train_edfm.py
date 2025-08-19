@@ -146,7 +146,10 @@ def launch(args):
     model_arch = models.resnet.__dict__[f"resnet{args.model_depth}"]
     abstract_resnet = nnx.eval_shape(
         lambda: model_arch(
-            norm_type=args.norm_type, num_classes=args.num_classes, rngs=nnx.Rngs(0)
+            norm_type=args.norm_type,
+            width_factor=args.model_width_factor,
+            num_classes=args.num_classes,
+            rngs=nnx.Rngs(0),
         )
     )
     resnet_graphdef, _ = nnx.split(abstract_resnet)
@@ -338,6 +341,7 @@ def main():
     parser.add_argument(
         "--model_depth", default=32, type=int, choices=[20, 32, 44, 56, 110]
     )
+    parser.add_argument("--model_width_factor", default=2, type=int)
     parser.add_argument("--batch_size", default=256, type=int)
     parser.add_argument("--norm_type", default="frn", type=str, choices=["bn", "frn"])
     parser.add_argument(
@@ -359,7 +363,9 @@ def main():
     parser.add_argument("--exp_name", default=None, type=str)
     parser.add_argument("--save_dir", default="./checkpoint/edfm", type=str)
     parser.add_argument(
-        "--resnet_dir", default="./checkpoint/resnet/2025-08-19_11-19-13", type=str
+        "--resnet_dir",
+        default="./checkpoint/kd/2025-08-19_18-25-17",
+        type=str,
     )
     parser.add_argument(
         "--teacher_dir", default="./checkpoint/multi_swag_collection", type=str

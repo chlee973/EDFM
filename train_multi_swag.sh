@@ -3,7 +3,7 @@
 # Configuration
 NUM_MODELS=10
 BASE_SEED=42
-OUTPUT_DIR="./checkpoint/multi_swag_collection"
+OUTPUT_DIR="./checkpoint/wide32_cifar100_multi_swag"
 TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 FINAL_OUTPUT_DIR="${OUTPUT_DIR}/${TIMESTAMP}"
 
@@ -15,10 +15,11 @@ echo "Output directory: ${FINAL_OUTPUT_DIR}"
 
 # Training parameters (modify as needed)
 MODEL_DEPTH=32
+MODEL_WDITH_FACTOR=2
 BATCH_SIZE=256
 NORM_TYPE="frn"
-DS_NAME="cifar10"
-NUM_CLASSES=10
+DS_NAME="cifar100"
+NUM_CLASSES=100
 OPTIM_LR=0.1
 OPTIM_SWA_LR=0.01
 OPTIM_MOMENTUM=0.9
@@ -50,6 +51,7 @@ for i in $(seq 1 $NUM_MODELS); do
     python train_swag.py \
         --seed $seed \
         --model_depth $MODEL_DEPTH \
+        --model_width_factor $MODEL_WDITH_FACTOR \
         --batch_size $BATCH_SIZE \
         --norm_type $NORM_TYPE \
         --ds_name $DS_NAME \
@@ -68,6 +70,7 @@ for i in $(seq 1 $NUM_MODELS); do
         --save_dir "$temp_checkpoint_dir" \
         --swag_save_dir "$temp_swag_dir" \
         --model_id "model_${model_id}_seed_${seed}" \
+        --exp_name "resnet${MODEL_DEPTH}-${MODEL_WDITH_FACTOR}_model_${model_id}_seed_${seed}" \
         --checkpoint_every_n_epochs 10 \
         --max_checkpoints_to_keep 30
     
@@ -82,7 +85,7 @@ for i in $(seq 1 $NUM_MODELS); do
         fi
         
         # Clean up checkpoint directory to save space
-        # rm -rf "$temp_checkpoint_dir"
+        rm -rf "$temp_checkpoint_dir"
         
     else
         echo "Model ${i} training failed"
@@ -112,8 +115,11 @@ Failed models: ${failed_models[*]}
 
 Training parameters:
 MODEL_DEPTH=${MODEL_DEPTH}
+MODEL_WDITH_FACTOR=${MODEL_WDITH_FACTOR}
 BATCH_SIZE=${BATCH_SIZE}
 NORM_TYPE=${NORM_TYPE}
+DS_NAME=${DS_NAME}
+NUM_CLASSES=${NUM_CLASSES}
 OPTIM_LR=${OPTIM_LR}
 OPTIM_SWA_LR=${OPTIM_SWA_LR}
 OPTIM_MOMENTUM=${OPTIM_MOMENTUM}
